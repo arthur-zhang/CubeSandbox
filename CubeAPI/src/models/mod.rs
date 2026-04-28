@@ -167,8 +167,8 @@ pub struct ListedSandbox {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "cpuCount")]
     pub cpu_count: i32,
     #[serde(rename = "memoryMB")]
@@ -197,8 +197,8 @@ pub struct SandboxDetail {
     pub client_id: String,
     #[serde(rename = "startedAt")]
     pub started_at: DateTime<Utc>,
-    #[serde(rename = "endAt")]
-    pub end_at: DateTime<Utc>,
+    #[serde(rename = "endAt", skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
     #[serde(rename = "envdVersion")]
     pub envd_version: String,
     #[serde(rename = "envdAccessToken", skip_serializing_if = "Option::is_none")]

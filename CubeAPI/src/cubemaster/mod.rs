@@ -744,9 +744,11 @@ pub struct SandboxInfo {
     pub host_id: String,
     #[serde(default, deserialize_with = "deserialize_sandbox_status")]
     pub status: String,
-    #[serde(default)]
+    /// CubeMaster `create_at` field, unix nanoseconds. 0 means "not set".
+    #[serde(default, rename = "create_at", deserialize_with = "deserialize_unix_nanos")]
     pub started_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    /// CubeMaster `pause_at` field, unix nanoseconds. 0 means "not paused".
+    #[serde(default, rename = "pause_at", deserialize_with = "deserialize_unix_nanos")]
     pub end_at: Option<DateTime<Utc>>,
     #[serde(default, alias = "cpuCount")]
     pub cpu_count: i32,
@@ -857,6 +859,16 @@ fn datetime_from_unix_nanos(value: i64) -> Option<DateTime<Utc>> {
     let seconds = value.div_euclid(1_000_000_000);
     let nanos = value.rem_euclid(1_000_000_000) as u32;
     DateTime::<Utc>::from_timestamp(seconds, nanos)
+}
+
+/// Deserialize a CubeMaster int64 unix-nanoseconds timestamp into Option<DateTime<Utc>>.
+/// Treats 0 / negative / null as None.
+fn deserialize_unix_nanos<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<i64>::deserialize(deserializer)?;
+    Ok(value.and_then(datetime_from_unix_nanos))
 }
 
 #[derive(Deserialize)]

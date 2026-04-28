@@ -91,8 +91,7 @@ impl SandboxService {
         let end_at = summary
             .as_ref()
             .and_then(|s| s.end_at.as_ref().cloned())
-            .or(d.end_at)
-            .unwrap_or(started_at);
+            .or(d.end_at);
 
         Ok(SandboxDetail {
             template_id: d.template_id,
@@ -570,7 +569,7 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
         sandbox_id: s.sandbox_id,
         client_id: s.host_id,
         started_at: s.started_at.unwrap_or(now),
-        end_at: s.end_at.unwrap_or(now),
+        end_at: s.end_at,
         cpu_count: s.cpu_count,
         memory_mb: s.memory_mb,
         disk_size_mb: Some(0),
