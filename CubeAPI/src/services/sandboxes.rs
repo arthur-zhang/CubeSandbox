@@ -605,8 +605,12 @@ pub(crate) fn filter_by_metadata(
 
 fn parse_state_filter(value: Option<&str>) -> Option<SandboxState> {
     match value {
+        Some("created") => Some(SandboxState::Created),
         Some("running") => Some(SandboxState::Running),
+        Some("pausing") => Some(SandboxState::Pausing),
         Some("paused") => Some(SandboxState::Paused),
+        Some("stopped") | Some("exited") => Some(SandboxState::Stopped),
+        Some("unknown") => Some(SandboxState::Unknown),
         _ => None,
     }
 }
@@ -617,16 +621,23 @@ fn is_success_ret_code(ret_code: i32) -> bool {
 
 fn sandbox_state_from_status(status: SandboxStatus) -> SandboxState {
     match status {
-        SandboxStatus::Paused => SandboxState::Paused,
         SandboxStatus::Running => SandboxState::Running,
-        _ => SandboxState::Running,
+        SandboxStatus::Pausing => SandboxState::Pausing,
+        SandboxStatus::Paused => SandboxState::Paused,
+        SandboxStatus::Stopped => SandboxState::Stopped,
+        SandboxStatus::Error => SandboxState::Unknown,
+        SandboxStatus::Unknown => SandboxState::Unknown,
     }
 }
 
 fn sandbox_state_from_str(status: &str) -> SandboxState {
-    match status.to_lowercase().as_str() {
+    match status.trim().to_lowercase().as_str() {
+        "created" => SandboxState::Created,
+        "running" => SandboxState::Running,
+        "pausing" => SandboxState::Pausing,
         "paused" => SandboxState::Paused,
-        _ => SandboxState::Running,
+        "stopped" | "exited" => SandboxState::Stopped,
+        _ => SandboxState::Unknown,
     }
 }
 

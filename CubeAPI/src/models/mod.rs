@@ -30,12 +30,20 @@ impl ApiError {
 pub type SandboxMetadata = HashMap<String, String>;
 pub type EnvVars = HashMap<String, String>;
 
-/// State of the sandbox (running | paused)
+/// State of the sandbox.
+///
+/// Values mirror CubeMaster's container status codes
+/// (see CubeMaster `getStatus`: 0=created, 1=running, 2=exited,
+/// 3=unknown, 4=pausing, 5=paused).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxState {
+    Created,
     Running,
+    Pausing,
     Paused,
+    Stopped,
+    Unknown,
 }
 
 /// Network configuration for sandbox egress/ingress control.

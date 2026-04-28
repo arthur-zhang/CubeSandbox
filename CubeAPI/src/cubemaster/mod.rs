@@ -866,12 +866,17 @@ enum SandboxStatusValue {
     Number(i32),
 }
 
+// Numeric status codes returned by CubeMaster `/cube/sandbox/list`.
+// Source of truth: CubeMaster/cmd/cubemastercli/commands/cubebox/list.go::getStatus
+//   0 => created, 1 => running, 2 => exited, 3 => unknown, 4 => pausing, 5 => paused
 fn sandbox_status_text_from_code(number: i32) -> &'static str {
     match number {
+        0 => "created",
         1 => "running",
-        2 => "paused",
-        3 => "stopped",
-        4 => "error",
+        2 => "exited",
+        3 => "unknown",
+        4 => "pausing",
+        5 => "paused",
         _ => "unknown",
     }
 }
@@ -891,13 +896,17 @@ where
 }
 
 fn normalize_sandbox_status_text(raw: &str) -> String {
-    match raw.trim().to_lowercase().as_str() {
+    let lowered = raw.trim().to_lowercase();
+    match lowered.as_str() {
+        "0" => sandbox_status_text_from_code(0).to_string(),
         "1" => sandbox_status_text_from_code(1).to_string(),
         "2" => sandbox_status_text_from_code(2).to_string(),
         "3" => sandbox_status_text_from_code(3).to_string(),
         "4" => sandbox_status_text_from_code(4).to_string(),
-        "running" | "paused" | "stopped" | "error" => raw.trim().to_lowercase(),
-        other => other.to_string(),
+        "5" => sandbox_status_text_from_code(5).to_string(),
+        "created" | "running" | "exited" | "stopped" | "unknown" | "pausing" | "paused"
+        | "error" => lowered,
+        _ => lowered,
     }
 }
 
