@@ -849,11 +849,11 @@ func (s *service) destroyDeadContainers() {
 			continue
 		}
 
-		scanDeadContainer(ctx, dc, s.cubeboxMgr.client, s.cleaner.TTL)
+		scanDeadContainer(ctx, dc, s.cubeboxMgr.client, s.cleaner.TTL, s.updateSandboxLocks)
 	}
 }
 
-func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *containerd.Client, ttl time.Duration) {
+func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *containerd.Client, ttl time.Duration, updateLocks *utils.ResourceLocks) {
 	now := time.Now()
 	var tmpDeadCount = 0
 	for _, cb := range dc {
@@ -873,13 +873,29 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 		if cb.GetStatus() != nil && cb.GetStatus().IsPaused() {
 			continue
 		}
-		ctx = namespaces.WithNamespace(ctx, cb.Namespace)
-		ctr, err := cubes.RecoverContainer(ctx, client, cb, cb.FirstContainer())
-		if err != nil {
-			stepLog.Errorf("recheck container status %s error: %v", cb.FirstContainer().ID, err)
+		// Also skip when an Update (Pause/Resume/...) is currently in flight
+		// for this sandbox.  Otherwise RecoverContainer's t.Status() may race
+		// with the in-progress update on the shim's sandbox mutex, time out,
+		// and the recovered status overwrites the live in-memory status with
+		// Unknown=true / FinishedAt=now -- causing a subsequent Pause to
+		// erroneously report "sandbox is terminating".  The update path
+		// already keeps the in-memory status consistent, so the GC has
+		// nothing useful to add here either.
+		unlock, ok := updateLocks.TryLock(cb.ID)
+		if !ok {
 			continue
 		}
-		if ctr.Status.IsTerminated() {
+		dead := func() bool {
+			defer unlock()
+			ctx = namespaces.WithNamespace(ctx, cb.Namespace)
+			ctr, err := cubes.RecoverContainer(ctx, client, cb, cb.FirstContainer())
+			if err != nil {
+				stepLog.Errorf("recheck container status %s error: %v", cb.FirstContainer().ID, err)
+				return false
+			}
+			if !ctr.Status.IsTerminated() {
+				return false
+			}
 			if ctr.Status.Status.FinishedAt == 0 {
 				ctr.Status.Update(func(s cubeboxstore.Status) (cubeboxstore.Status, error) {
 					s.FinishedAt = now.UnixNano()
@@ -888,8 +904,12 @@ func scanDeadContainer(ctx context.Context, dc []*cubeboxstore.CubeBox, client *
 			}
 			if time.Unix(0, ctr.Status.Status.FinishedAt).Add(ttl).Before(now) {
 				stepLog.Warnf("dead container %s is terminating and reach ttl time", ctr.ID)
-				tmpDeadCount++
+				return true
 			}
+			return false
+		}()
+		if dead {
+			tmpDeadCount++
 		}
 	}
 	if deadContainerCount != tmpDeadCount {

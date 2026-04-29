@@ -43,19 +43,59 @@ func (r *ResourceLocks) Lock(resource string) func() {
 
 	l.mtx.Lock()
 
+	return r.makeUnlock(resource, l)
+}
+
+// TryLock attempts to acquire the per-resource lock without blocking.
+// On success it returns an unlock function and true. On failure (already
+// held by another caller) it returns nil and false.
+func (r *ResourceLocks) TryLock(resource string) (func(), bool) {
+	r.mutex.Lock()
+
+	l, ok := r.locks[resource]
+	if ok {
+		l.count++
+	} else {
+		r.locks[resource] = &ResMutex{
+			mtx:   &sync.Mutex{},
+			count: 1,
+		}
+		l = r.locks[resource]
+	}
+
+	r.mutex.Unlock()
+
+	if !l.mtx.TryLock() {
+		// Could not acquire; release the bookkeeping reference we just took.
+		r.mutex.Lock()
+		defer r.mutex.Unlock()
+		if cur, ok := r.locks[resource]; ok {
+			if cur.count == 1 {
+				delete(r.locks, resource)
+			} else {
+				cur.count--
+			}
+		}
+		return nil, false
+	}
+
+	return r.makeUnlock(resource, l), true
+}
+
+func (r *ResourceLocks) makeUnlock(resource string, l *ResMutex) func() {
 	return func() {
 		l.mtx.Unlock()
 
 		r.mutex.Lock()
 		defer r.mutex.Unlock()
 
-		l, ok := r.locks[resource]
+		cur, ok := r.locks[resource]
 		if ok {
-			if l.count == 1 {
+			if cur.count == 1 {
 				delete(r.locks, resource)
 				return
 			}
-			l.count--
+			cur.count--
 		}
 	}
 }
