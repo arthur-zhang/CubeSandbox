@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/ttrpc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
@@ -118,16 +119,6 @@ func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSa
 		RequestID: req.RequestID,
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
-	if sb.GetStatus().IsPaused() {
-		rsp.Ret.RetMsg = "sandbox is already paused"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-		return rsp, nil
-	}
-	if sb.GetStatus().IsTerminated() {
-		rsp.Ret.RetMsg = "sandbox is terminating"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
-		return rsp, nil
-	}
 
 	ns := sb.Namespace
 	if ns == "" {
@@ -140,6 +131,43 @@ func (s *service) UpdateWithPause(ctx context.Context, req *cubebox.UpdateCubeSa
 		rsp.Ret.RetMsg = err.Error()
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskPauseFailed
 		return rsp, nil
+	}
+	// Use the shim's runtime state as the source of truth.  The cached
+	// PausedAt/PausingAt fields can drift after a successful Resume because
+	// RecoverContainer (DeadGC, restart) replaces the StatusStorage pointer
+	// with a freshly reconstructed Status — when that runs in the small
+	// window between Resume returning and the next Pause arriving, it can
+	// resurrect stale pause flags, making this early check spuriously fail
+	// with "sandbox is already paused" / "sandbox is terminating".
+	runtimeState, runtimeErr := taskRuntimeStatus(ctx, task)
+	switch {
+	case runtimeErr != nil:
+		log.G(ctx).Warnf("UpdateWithPause: failed to query runtime task status for %s: %v; falling back to cache", sb.ID, runtimeErr)
+		if sb.GetStatus().IsPaused() {
+			rsp.Ret.RetMsg = "sandbox is already paused"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+		if sb.GetStatus().IsTerminated() {
+			rsp.Ret.RetMsg = "sandbox is terminating"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+			return rsp, nil
+		}
+	case runtimeState == containerd.Paused || runtimeState == containerd.Pausing:
+		rsp.Ret.RetMsg = "sandbox is already paused"
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		return rsp, nil
+	case runtimeState == containerd.Stopped:
+		rsp.Ret.RetMsg = "sandbox is terminating"
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
+		return rsp, nil
+	default:
+		// Runtime is running/created. If the cache disagrees, reconcile it
+		// so subsequent reads (including this request below) see the truth.
+		if sb.GetStatus().IsPaused() || sb.GetStatus().IsTerminated() {
+			log.G(ctx).Warnf("UpdateWithPause: stale cached state for %s (runtime=%v); reconciling", sb.ID, runtimeState)
+			reconcileToRunning(sb)
+		}
 	}
 	log.G(ctx).Infof("UpdateWithPause:%s", utils.InterfaceToString(req))
 	ctx = addPauseResumeMetaData(ctx, req)
@@ -186,11 +214,6 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		RequestID: req.RequestID,
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 	}
-	if !sb.GetStatus().IsPaused() {
-		rsp.Ret.RetMsg = "sandbox is not paused"
-		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
-		return rsp, nil
-	}
 
 	ns := sb.Namespace
 	if ns == "" {
@@ -200,6 +223,25 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 	task, err := sb.FirstContainer().Container.Task(ctx, nil)
 	if err != nil {
 		rsp.Ret.RetMsg = err.Error()
+		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
+		return rsp, nil
+	}
+	// Trust the shim's runtime state over the cached PausedAt/PausingAt
+	// (see comment in UpdateWithPause).  Only reject the request when the
+	// runtime confirms the sandbox is not paused.
+	runtimeState, runtimeErr := taskRuntimeStatus(ctx, task)
+	switch {
+	case runtimeErr != nil:
+		log.G(ctx).Warnf("UpdateWithResume: failed to query runtime task status for %s: %v; falling back to cache", sb.ID, runtimeErr)
+		if !sb.GetStatus().IsPaused() {
+			rsp.Ret.RetMsg = "sandbox is not paused"
+			rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
+			return rsp, nil
+		}
+	case runtimeState == containerd.Paused || runtimeState == containerd.Pausing:
+		// Legitimate resume target.
+	default:
+		rsp.Ret.RetMsg = "sandbox is not paused"
 		rsp.Ret.RetCode = errorcode.ErrorCode_TaskResumeFailed
 		return rsp, nil
 	}
@@ -227,4 +269,36 @@ func (s *service) UpdateWithResume(ctx context.Context, req *cubebox.UpdateCubeS
 		}
 	}
 	return rsp, nil
+}
+
+// taskRuntimeStatus returns the shim-reported task status, or an error when
+// the runtime cannot be reached.  It is the source of truth for pause/resume
+// decisions because the cached PausedAt/PausingAt fields can be temporarily
+// rewritten by RecoverContainer (DeadGC, restart) and other status-refresh
+// paths.
+func taskRuntimeStatus(ctx context.Context, task containerd.Task) (containerd.ProcessStatus, error) {
+	st, err := task.Status(ctx)
+	if err != nil {
+		return "", err
+	}
+	return st.Status, nil
+}
+
+// reconcileToRunning clears stale pause / terminated bits from every
+// container's cached status so that subsequent reads (within the same
+// request and across the rest of the system) reflect the runtime's view of
+// a healthy, running sandbox.
+func reconcileToRunning(sb *cubeboxstore.CubeBox) {
+	for _, c := range sb.AllContainers() {
+		if c.Status == nil {
+			continue
+		}
+		c.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
+			status.PausedAt = 0
+			status.PausingAt = 0
+			status.FinishedAt = 0
+			status.Unknown = false
+			return status, nil
+		})
+	}
 }
